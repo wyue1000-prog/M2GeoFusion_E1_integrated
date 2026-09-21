@@ -1,0 +1,15 @@
+{
+  "experiment_name": "test001",
+  "LG": "/home/wqy/workspace/M2GeoFusion_E1_integrated(1)/M2GeoFusion_E1_integrated/data/test001/LG/Camera3_6.bmp",
+  "LS": "/home/wqy/workspace/M2GeoFusion_E1_integrated(1)/M2GeoFusion_E1_integrated/data/test001/LS/Camera4_6.bmp",
+  "calibration": "/home/wqy/workspace/M2GeoFusion_E1_integrated(1)/M2GeoFusion_E1_integrated/calibration/calibrationSession.mat",
+  "prompt": "wire harness. pipe.",
+  "dilate_radius": 20,
+  "alignment": "scale",
+  "dedup_factor": 1.5,
+  "track_max_points": 300,
+  "track_vis_threshold": 0.5,
+  "track_conf_threshold": 0.001,
+  "grounded_sam_env": "grounded_sam2",
+  "vggt_env": "vggt"
+}

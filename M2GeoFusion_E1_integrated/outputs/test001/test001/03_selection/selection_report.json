@@ -1,0 +1,41 @@
+{
+  "lg_path": "/home/wqy/workspace/M2GeoFusion_E1_integrated(1)/M2GeoFusion_E1_integrated/data/test001/LG/Camera3_6.bmp",
+  "ls_path": "/home/wqy/workspace/M2GeoFusion_E1_integrated(1)/M2GeoFusion_E1_integrated/data/test001/LS/Camera4_6.bmp",
+  "calibration_file": null,
+  "calibration_used_in_E1_core": false,
+  "calibration_note": "E1 的 LS->LG 像素映射使用 Joint VGGT 的 common 3D frame + Joint LG camera projection。单独的 LG-LS 标定关系不能在未知深度下唯一决定 pixel-to-pixel mapping；物理标定将在后续 Geometry Gate / metric stereo path 中使用。",
+  "alignment_mode": "scale",
+  "scale": 1.0675669368260106,
+  "R_align": [
+    [
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "t_align": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "vggt_shape_hw": [
+    420,
+    518
+  ],
+  "all_ls_valid_count": 217560,
+  "selected_ls_count": 53507,
+  "selected_ratio_of_valid_ls": 0.24594134951277807,
+  "lg_alignment_median_error": 0.08047420989493602,
+  "lg_alignment_mean_error": 0.15932873689013996,
+  "lg_alignment_p90_error": 0.38287104216472717
+}

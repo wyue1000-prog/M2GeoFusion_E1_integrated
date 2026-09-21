@@ -1,0 +1,33 @@
+{
+  "lg_path": "/home/wqy/workspace/M2GeoFusion_E1_integrated(1)/M2GeoFusion_E1_integrated/data/test001/LG/Camera3_6.bmp",
+  "prompt": "wire harness. pipe.",
+  "image_width": 1280,
+  "image_height": 1024,
+  "dilate_radius_px": 20,
+  "target_pixel_count": 239497,
+  "need_pixel_count": 352125,
+  "detections": [
+    {
+      "class_name": "pipe",
+      "grounding_confidence": 0.5620877146720886,
+      "sam_score": 0.96484375,
+      "bbox_xyxy": [
+        303.76251220703125,
+        685.3840942382812,
+        1277.505615234375,
+        1018.8967895507812
+      ]
+    },
+    {
+      "class_name": "wire harness",
+      "grounding_confidence": 0.5313749313354492,
+      "sam_score": 0.98046875,
+      "bbox_xyxy": [
+        623.9517822265625,
+        354.4970703125,
+        1277.5501708984375,
+        657.91748046875
+      ]
+    }
+  ]
+}

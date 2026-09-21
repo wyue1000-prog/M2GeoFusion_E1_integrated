@@ -1,0 +1,53 @@
+{
+  "lg_path": "/home/wqy/workspace/M2GeoFusion_E1_integrated(1)/M2GeoFusion_E1_integrated/data/test001/LG/Camera3_6.bmp",
+  "ls_path": "/home/wqy/workspace/M2GeoFusion_E1_integrated(1)/M2GeoFusion_E1_integrated/data/test001/LS/Camera4_6.bmp",
+  "checkpoint": "/home/wqy/workspace/vggt/checkpoints/model.pt",
+  "preprocess_mode": "crop",
+  "gray_world_shape": [
+    1,
+    420,
+    518,
+    3
+  ],
+  "joint_world_shape": [
+    2,
+    420,
+    518,
+    3
+  ],
+  "input_order_joint": [
+    "LG",
+    "LS"
+  ],
+  "track_query_count": 84,
+  "track_kept_count": 74,
+  "track_vis_threshold": 0.5,
+  "track_conf_threshold": 0.001,
+  "T_LG_from_LS_predicted": [
+    [
+      0.9994545119313295,
+      -0.02450765785205279,
+      -0.022137772995527567,
+      -0.008251145655961831
+    ],
+    [
+      0.01607650698937157,
+      0.9465704921917131,
+      -0.3220960091214365,
+      0.16652024274882654
+    ],
+    [
+      0.02884878138312595,
+      0.3215644167858645,
+      0.9464481260428078,
+      0.014755733791863236
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "note": "world_points_from_depth uses VGGT depth + predicted camera parameters; track queries use LG as the first/reference frame."
+}

@@ -1,0 +1,16 @@
+{
+  "anchor_count": 217560,
+  "all_ls_valid_count": 217560,
+  "need_selected_ls_count": 53507,
+  "median_gray_nn_spacing": 0.002241304277100336,
+  "dedup_factor": 1.5,
+  "tau_dup": 0.003361956415650504,
+  "true_added_ls_count": 53507,
+  "true_added_ratio_of_need_selected": 1.0,
+  "raw_merged_count": 271067,
+  "dedup_merged_count": 271067,
+  "ls_to_gray_min_distance": 0.08126670840725357,
+  "ls_to_gray_median_distance": 0.14109292575540483,
+  "ls_to_gray_p90_distance": 0.1784163124234309,
+  "ls_to_gray_max_distance": 0.2503505298614262
+}
