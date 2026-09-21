@@ -1,0 +1,53 @@
+# =========================
+# PyCharm / JetBrains
+# =========================
+.idea/
+.idea_backup/
+*.iml
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+
+# =========================
+# Experiment outputs
+# =========================
+M2GeoFusion_E1_integrated/outputs/
+
+# =========================
+# Large reconstruction files
+# =========================
+*.ply
+*.glb
+*.npz
+*.npy
+
+# =========================
+# Model weights
+# =========================
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# =========================
+# Temporary files
+# =========================
+*.log
+*.tmp
+*.bak
+*~
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
