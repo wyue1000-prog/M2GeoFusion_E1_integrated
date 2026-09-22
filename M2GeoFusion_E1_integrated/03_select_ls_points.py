@@ -26,12 +26,20 @@ def get_world(npz):
     return np.asarray(npz["world_points_from_depth"])
 
 
+def get_camera_param_source(npz) -> str:
+    if "camera_param_source" not in npz:
+        raise KeyError("NPZ missing 'camera_param_source'; rerun 02_run_vggt.py with the same camera mode.")
+    value = np.asarray(npz["camera_param_source"])
+    return str(value.item() if value.ndim == 0 else value.reshape(-1)[0])
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lg", required=True, help="原始 LG 路径")
     ap.add_argument("--ls", required=True, help="原始 LS 路径")
-    ap.add_argument("--calib", required=False, default=None,
-                    help="LG-LS 标定结果路径。E1 核心暂不直接使用，只登记到实验记录。")
+    ap.add_argument("--calib", required=False, default=None, help="Deprecated alias for --calib-mat.")
+    ap.add_argument("--calib-mat", required=False, default=None)
+    ap.add_argument("--camera-param-mode", type=int, choices=[0, 1], default=0)
     ap.add_argument("--need-mask", required=True, help="原始分辨率 need_mask.npy")
     ap.add_argument("--gray-npz", required=True)
     ap.add_argument("--joint-npz", required=True)
@@ -55,6 +63,19 @@ def main():
     need_original = np.load(args.need_mask)
     gray = np.load(args.gray_npz)
     joint = np.load(args.joint_npz)
+    source_gray = get_camera_param_source(gray)
+    source_joint = get_camera_param_source(joint)
+    translation_scale = (float(np.asarray(joint["translation_scale_physical_to_vggt"]).item())
+                         if "translation_scale_physical_to_vggt" in joint else None)
+    expected_source = "calibration" if args.camera_param_mode == 1 else "vggt_prediction"
+    if source_gray != expected_source or source_joint != expected_source:
+        raise RuntimeError(
+            f"Camera parameter source mismatch: requested {expected_source}, "
+            f"gray={source_gray}, joint={source_joint}. Rerun stage 02 with the same mode."
+        )
+    print(f"[E1-03] camera parameter source = {source_joint}")
+    if args.camera_param_mode == 1:
+        print("[E1-03] projection uses calibrated LG K + calibrated LG world frame")
 
     Pg0 = get_world(gray)[0]      # H,W,3
     Pgj = get_world(joint)[0]     # joint LG
@@ -236,11 +257,15 @@ def main():
         ls_all_colors=all_ls_colors,
         ls_selected_points=selected_ls_points,
         ls_selected_colors=selected_ls_colors,
+        camera_param_source=np.asarray(source_joint),
+        camera_param_mode=np.asarray(args.camera_param_mode, dtype=np.int32),
+        translation_scale_physical_to_vggt=np.asarray(translation_scale if translation_scale is not None else np.nan),
     )
 
+    calib_arg = args.calib_mat or args.calib
     calib_path = None
-    if args.calib:
-        calib_path = str(Path(args.calib).expanduser().resolve())
+    if calib_arg:
+        calib_path = str(Path(calib_arg).expanduser().resolve())
         if not Path(calib_path).exists():
             raise FileNotFoundError(calib_path)
 
@@ -248,13 +273,13 @@ def main():
         "lg_path": lg,
         "ls_path": ls,
         "calibration_file": calib_path,
-        "calibration_used_in_E1_core": False,
-        "calibration_note": (
-            "E1 的 LS->LG 像素映射使用 Joint VGGT 的 common 3D frame + "
-            "Joint LG camera projection。单独的 LG-LS 标定关系不能在未知深度下"
-            "唯一决定 pixel-to-pixel mapping；物理标定将在后续 Geometry Gate / "
-            "metric stereo path 中使用。"
-        ),
+        "camera_param_mode": int(args.camera_param_mode),
+        "camera_param_source": source_joint,
+        "translation_scale_physical_to_vggt": translation_scale,
+        "calibration_used_in_E1_core": bool(args.camera_param_mode == 1),
+        "calibration_note": ("LS points are projected through calibrated LG K and calibrated LG-world frame."
+                             if args.camera_param_mode == 1 else
+                             "Legacy mode: Joint VGGT predicted camera parameters are used."),
         "alignment_mode": args.alignment,
         "scale": float(scale),
         "R_align": np.asarray(R_align).tolist(),

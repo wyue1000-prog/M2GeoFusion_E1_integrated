@@ -18,6 +18,15 @@ from config import (
     TRACK_CONF_THRESHOLD,
 )
 from common import ensure_dir, save_json, preprocess_mask_like_vggt, image_tensor_to_rgb_uint8
+from calibration_geometry import (
+    adjust_intrinsics_to_vggt_grid,
+    compute_vggt_preprocess_meta,
+    estimate_translation_scale_to_vggt_depth,
+    load_user_calibration,
+    make_calibrated_extrinsics,
+    make_gray_only_calibrated_extrinsics,
+    save_calibration_report,
+)
 
 
 def unwrap_state_dict(obj):
@@ -136,6 +145,53 @@ def run_vggt(image_paths, model, device, load_and_preprocess_images, pose_encodi
     return out
 
 
+def _tensor_predictions_to_numpy(pred, images, query_points=None):
+    """Convert BF16/FP16 predictions safely before NumPy serialization."""
+    out = {}
+    for key, value in pred.items():
+        if isinstance(value, torch.Tensor):
+            out[key] = value.detach().float().cpu().numpy().squeeze(0)
+    out["images"] = images.detach().float().cpu().numpy()
+    if query_points is not None:
+        out["query_points"] = np.asarray(query_points, dtype=np.float32)
+    return out
+
+
+def run_vggt_without_camera_head(image_paths, model, device, load_and_preprocess_images,
+                                 unproject_depth_map_to_point_map, extrinsic, intrinsic,
+                                 preprocess_mode="crop", query_points=None):
+    """Run VGGT's feature/depth/point/(optional) track heads without camera_head()."""
+    image_paths = [str(Path(x).expanduser().resolve()) for x in image_paths]
+    images = load_and_preprocess_images(image_paths, mode=preprocess_mode).to(device)
+    print(f"[E1-02] input order = {image_paths}")
+    print(f"[E1-02] preprocessed tensor = {tuple(images.shape)}")
+    dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    model_images = images[None] if images.ndim == 4 else images
+    q_tensor = None if query_points is None else torch.as_tensor(query_points, dtype=torch.float32, device=device)
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=dtype):
+            aggregated_tokens_list, patch_start_idx = model.aggregator(model_images)
+            depth, depth_conf = model.depth_head(aggregated_tokens_list, images=model_images, patch_start_idx=patch_start_idx)
+            pts3d, pts3d_conf = model.point_head(aggregated_tokens_list, images=model_images, patch_start_idx=patch_start_idx)
+            pred = {"depth": depth, "depth_conf": depth_conf, "world_points": pts3d,
+                    "world_points_conf": pts3d_conf}
+            if q_tensor is not None:
+                track_list, vis, conf = model.track_head(
+                    aggregated_tokens_list, images=model_images, patch_start_idx=patch_start_idx,
+                    query_points=q_tensor[None] if q_tensor.ndim == 2 else q_tensor,
+                )
+                pred.update({"track": track_list[-1], "vis": vis, "conf": conf})
+    out = _tensor_predictions_to_numpy(pred, images, query_points)
+    out["extrinsic"] = np.asarray(extrinsic, dtype=np.float64)
+    out["intrinsic"] = np.asarray(intrinsic, dtype=np.float64)
+    out["world_points_from_depth"] = unproject_depth_map_to_point_map(
+        out["depth"], out["extrinsic"], out["intrinsic"]
+    )
+    out["camera_param_source"] = np.asarray("calibration")
+    torch.cuda.empty_cache()
+    return out
+
+
 def save_npz(path, pred):
     clean = {k: v for k, v in pred.items() if isinstance(v, np.ndarray)}
     np.savez_compressed(path, **clean)
@@ -157,7 +213,7 @@ def camera_center_from_extrinsic(E):
     return -R.T @ t
 
 
-def save_pose_txt(out_dir: Path, gray, joint):
+def save_pose_txt(out_dir: Path, gray, joint, camera_param_mode=0, calibration_scale_info=None):
     Eg = np.asarray(gray["extrinsic"])[0]
     Kg = np.asarray(gray["intrinsic"])[0]
     EJg, EJs = np.asarray(joint["extrinsic"])[0], np.asarray(joint["extrinsic"])[1]
@@ -170,7 +226,12 @@ def save_pose_txt(out_dir: Path, gray, joint):
     T_ls_from_lg = np.linalg.inv(T_lg_from_ls)
 
     lines = []
-    lines.append("M2GeoFusion / VGGT predicted camera parameters\n")
+    if camera_param_mode == 1:
+        lines.append("CAMERA_PARAM_MODE = 1\n")
+        lines.append("VGGT CAMERA HEAD IS DISABLED / NOT USED FOR GEOMETRY.\n")
+        lines.append("The following camera matrices used by the pipeline come from MATLAB calibration.\n")
+    else:
+        lines.append("M2GeoFusion / VGGT predicted camera parameters\n")
     lines.append("Convention: extrinsic maps world -> camera: X_cam = R * X_world + t\n")
     lines.append("\n=== Pass A: LG-only ===\n")
     lines.append("Intrinsic K_LG_only (3x3):\n" + matrix_text(Kg) + "\n")
@@ -183,15 +244,20 @@ def save_pose_txt(out_dir: Path, gray, joint):
     lines.append("\nIntrinsic K_joint_LS (3x3):\n" + matrix_text(KJs) + "\n")
     lines.append("Extrinsic E_joint_LS (3x4):\n" + matrix_text(EJs) + "\n")
     lines.append("Camera center C_joint_LS:\n" + " ".join(f"{x:.9f}" for x in camera_center_from_extrinsic(EJs)) + "\n")
-    lines.append("\n=== Relative pose predicted by VGGT ===\n")
+    lines.append("\n=== Relative pose from MATLAB calibration ===\n" if camera_param_mode == 1 else "\n=== Relative pose predicted by VGGT ===\n")
     lines.append("T_LG_from_LS (4x4), maps a 3D point from LS camera coordinates to LG camera coordinates:\n")
     lines.append(matrix_text(T_lg_from_ls) + "\n")
     lines.append("\nT_LS_from_LG (4x4), inverse transform:\n")
     lines.append(matrix_text(T_ls_from_lg) + "\n")
+    if camera_param_mode == 1 and calibration_scale_info is not None:
+        lines.append("\nphysical calibration t = " + " ".join(f"{x:.9f}" for x in calibration_scale_info["physical_t"]) + "\n")
+        lines.append("normalized t used with VGGT depth = " + " ".join(f"{x:.9f}" for x in calibration_scale_info["normalized_t"]) + "\n")
+        lines.append(f"translation scale s = {calibration_scale_info['scale']:.12g}\n")
 
     (out_dir / "vggt_pose.txt").write_text("".join(lines), encoding="utf-8")
     (out_dir / "relative_pose_LS_to_LG.txt").write_text(
-        "T_LG_from_LS\n" + matrix_text(T_lg_from_ls) + "\n",
+        ("CAMERA_PARAM_MODE = 1\nSource: MATLAB calibration\n" if camera_param_mode == 1 else "")
+        + "T_LG_from_LS\n" + matrix_text(T_lg_from_ls) + "\n",
         encoding="utf-8",
     )
     return T_lg_from_ls, T_ls_from_lg
@@ -279,6 +345,8 @@ def main():
     ap.add_argument("--track-max-points", type=int, default=TRACK_MAX_POINTS)
     ap.add_argument("--track-vis-threshold", type=float, default=TRACK_VIS_THRESHOLD)
     ap.add_argument("--track-conf-threshold", type=float, default=TRACK_CONF_THRESHOLD)
+    ap.add_argument("--camera-param-mode", type=int, choices=[0, 1], default=0)
+    ap.add_argument("--calib-mat", type=str, default=None)
     args = ap.parse_args()
 
     lg = Path(args.lg).expanduser().resolve()
@@ -289,6 +357,10 @@ def main():
     for p in [lg, ls, vggt_root, ckpt]:
         if not p.exists():
             raise FileNotFoundError(p)
+    if args.camera_param_mode == 1 and not args.calib_mat:
+        raise ValueError("--calib-mat is required when --camera-param-mode=1")
+    if args.camera_param_mode == 1 and not Path(args.calib_mat).expanduser().is_file():
+        raise FileNotFoundError(args.calib_mat)
 
     sys.path.insert(0, str(vggt_root))
     from vggt.models.vggt import VGGT
@@ -302,11 +374,39 @@ def main():
     print("[E1-02] GPU:", torch.cuda.get_device_name(0))
     model = load_local_vggt(VGGT, ckpt, device)
 
+    calib = None
+    calibration_scale_info = None
+    if args.camera_param_mode == 1:
+        print("[E1-02] camera param mode = CALIBRATION")
+        print("[E1-02] VGGT Camera Head = SKIPPED")
+        calib = load_user_calibration(args.calib_mat)
+        meta_gray = compute_vggt_preprocess_meta([lg], args.preprocess_mode)
+        meta_joint = compute_vggt_preprocess_meta([lg, ls], args.preprocess_mode)
+        K_lg_gray = adjust_intrinsics_to_vggt_grid(calib.K_lg, meta_gray[0])
+        K_lg_joint = adjust_intrinsics_to_vggt_grid(calib.K_lg, meta_joint[0])
+        K_ls_joint = adjust_intrinsics_to_vggt_grid(calib.K_ls, meta_joint[1])
+        print("[E1-02] K_LG original =\n", calib.K_lg)
+        print("[E1-02] K_LS original =\n", calib.K_ls)
+        print("[E1-02] K_LG VGGT-grid =\n", K_lg_joint)
+        print("[E1-02] K_LS VGGT-grid =\n", K_ls_joint)
+        print("[E1-02] calibrated R_LG_to_LS =\n", calib.R_lg_to_ls)
+        print("[E1-02] calibrated t physical =", calib.t_lg_to_ls)
+    else:
+        print("[E1-02] camera param mode = VGGT PREDICTION")
+
     print("\n[E1-02] ===== Pass A: LG only =====")
-    gray = run_vggt(
-        [lg], model, device, load_and_preprocess_images, pose_encoding_to_extri_intri,
-        unproject_depth_map_to_point_map, preprocess_mode=args.preprocess_mode,
-    )
+    if args.camera_param_mode == 0:
+        gray = run_vggt(
+            [lg], model, device, load_and_preprocess_images, pose_encoding_to_extri_intri,
+            unproject_depth_map_to_point_map, preprocess_mode=args.preprocess_mode,
+        )
+        gray["camera_param_source"] = np.asarray("vggt_prediction")
+    else:
+        gray = run_vggt_without_camera_head(
+            [lg], model, device, load_and_preprocess_images, unproject_depth_map_to_point_map,
+            make_gray_only_calibrated_extrinsics(), K_lg_gray[None],
+            preprocess_mode=args.preprocess_mode,
+        )
     save_npz(out_dir / "gray_only.npz", gray)
     gc.collect(); torch.cuda.empty_cache()
 
@@ -326,14 +426,60 @@ def main():
     print(f"[E1-02] track query points = {len(query_points)}")
 
     print("\n[E1-02] ===== Pass B: [LG, LS] + Track Head =====")
-    joint = run_vggt(
-        [lg, ls], model, device, load_and_preprocess_images, pose_encoding_to_extri_intri,
-        unproject_depth_map_to_point_map, preprocess_mode=args.preprocess_mode,
-        query_points=query_points,
-    )
+    if args.camera_param_mode == 0:
+        joint = run_vggt(
+            [lg, ls], model, device, load_and_preprocess_images, pose_encoding_to_extri_intri,
+            unproject_depth_map_to_point_map, preprocess_mode=args.preprocess_mode,
+            query_points=query_points,
+        )
+        joint["camera_param_source"] = np.asarray("vggt_prediction")
+    else:
+        # Depth is needed to estimate the only permitted physical-to-normalized
+        # translation scale.  The temporary zero-baseline unprojection below is
+        # immediately replaced after that estimate.
+        joint = run_vggt_without_camera_head(
+            [lg, ls], model, device, load_and_preprocess_images, unproject_depth_map_to_point_map,
+            make_calibrated_extrinsics(calib.R_lg_to_ls, calib.t_lg_to_ls, 0.0),
+            np.stack([K_lg_joint, K_ls_joint]), preprocess_mode=args.preprocess_mode,
+            query_points=query_points,
+        )
+        scale_info = estimate_translation_scale_to_vggt_depth(
+            joint["depth"][0], joint["depth"][1], K_lg_joint, K_ls_joint,
+            calib.R_lg_to_ls, calib.t_lg_to_ls,
+            joint.get("depth_conf", [None, None])[0], joint.get("depth_conf", [None, None])[1],
+        )
+        scale = scale_info["scale_physical_translation_to_vggt"]
+        joint["extrinsic"] = make_calibrated_extrinsics(calib.R_lg_to_ls, calib.t_lg_to_ls, scale)
+        joint["translation_scale_physical_to_vggt"] = np.asarray(scale, dtype=np.float64)
+        joint["world_points_from_depth"] = unproject_depth_map_to_point_map(
+            joint["depth"], joint["extrinsic"], joint["intrinsic"]
+        )
+        calibration_scale_info = {
+            "scale": scale,
+            "physical_t": calib.t_lg_to_ls,
+            "normalized_t": scale * calib.t_lg_to_ls,
+        }
+        print("[E1-02] translation scale physical->VGGT =", scale)
+        print("[E1-02] normalized baseline =", calibration_scale_info["normalized_t"])
+        save_calibration_report(out_dir / "calibration_report.json", calib, K_lg_joint, K_ls_joint,
+                                scale_info, joint["extrinsic"], meta_joint)
+        np.savez_compressed(out_dir / "calibration_used.npz",
+                            K_lg_original=calib.K_lg, K_ls_original=calib.K_ls,
+                            K_lg_vggt=K_lg_joint, K_ls_vggt=K_ls_joint,
+                            R_lg_to_ls=calib.R_lg_to_ls, T_lg_to_ls_physical=calib.t_lg_to_ls,
+                            T_lg_to_ls_vggt_normalized=scale * calib.t_lg_to_ls,
+                            translation_scale=scale, extrinsic_joint_used=joint["extrinsic"])
+        (out_dir / "camera_params_used.txt").write_text(
+            "CAMERA_PARAM_MODE = 1\nSource: MATLAB calibration\n"
+            "Convention: X_LS = R_LG_to_LS @ X_LG + t_LG_to_LS\n\n"
+            f"K_LG (VGGT grid):\n{matrix_text(K_lg_joint)}\n\nK_LS (VGGT grid):\n{matrix_text(K_ls_joint)}\n\n"
+            f"R_LG_to_LS:\n{matrix_text(calib.R_lg_to_ls)}\n\n"
+            f"t physical: {calib.t_lg_to_ls.tolist()}\n"
+            f"translation scale: {scale:.12g}\n"
+            f"t normalized: {(scale * calib.t_lg_to_ls).tolist()}\n", encoding="utf-8")
     save_npz(out_dir / "joint_LG_LS.npz", joint)
 
-    T_lg_from_ls, _ = save_pose_txt(out_dir, gray, joint)
+    T_lg_from_ls, _ = save_pose_txt(out_dir, gray, joint, args.camera_param_mode, calibration_scale_info)
     kept = save_track_visualization(
         out_dir, joint,
         vis_thr=args.track_vis_threshold,
@@ -345,6 +491,9 @@ def main():
         "ls_path": str(ls),
         "checkpoint": str(ckpt),
         "preprocess_mode": args.preprocess_mode,
+        "camera_param_mode": int(args.camera_param_mode),
+        "camera_param_source": "calibration" if args.camera_param_mode == 1 else "vggt_prediction",
+        "calibration_mat": str(Path(args.calib_mat).expanduser().resolve()) if args.calib_mat else None,
         "gray_world_shape": list(gray["world_points_from_depth"].shape),
         "joint_world_shape": list(joint["world_points_from_depth"].shape),
         "input_order_joint": ["LG", "LS"],
@@ -352,8 +501,11 @@ def main():
         "track_kept_count": int(kept),
         "track_vis_threshold": float(args.track_vis_threshold),
         "track_conf_threshold": float(args.track_conf_threshold),
-        "T_LG_from_LS_predicted": np.asarray(T_lg_from_ls).tolist(),
-        "note": "world_points_from_depth uses VGGT depth + predicted camera parameters; track queries use LG as the first/reference frame.",
+        "T_LG_from_LS": np.asarray(T_lg_from_ls).tolist(),
+        "translation_scale_physical_to_vggt": calibration_scale_info["scale"] if calibration_scale_info else None,
+        "note": ("world_points_from_depth uses VGGT depth + MATLAB-calibrated K/R/t with fitted normalized translation scale."
+                 if args.camera_param_mode == 1 else
+                 "world_points_from_depth uses VGGT depth + predicted camera parameters; track queries use LG as the first/reference frame."),
     })
 
     print("\n[E1-02] saved:")

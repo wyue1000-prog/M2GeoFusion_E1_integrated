@@ -12,6 +12,7 @@ You no longer need to run 01/02/03/04/05 one by one.
 """
 
 import json
+import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -24,16 +25,17 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 # 2) Experiment name. Change this for every new pair to avoid overwriting old results.
-EXPERIMENT_NAME = "test001"
+EXPERIMENT_NAME = "test002"
 
 # 3) Input LG / LS images
-LG_PATH = PROJECT_ROOT / "data/test001/LG/Camera3_6.bmp"
-LS_PATH = PROJECT_ROOT / "data/test001/LS/Camera4_6.bmp"
+LG_PATH = PROJECT_ROOT / "data/test002/LG/Camera3_416.bmp"
+LS_PATH = PROJECT_ROOT / "data/test002/LS/Camera4_416.bmp"
 
-# 4) Physical LG-LS calibration file.
-# Current E1 only records this path; later calibration-guided correction will use its matrices.
-CALIB_PATH = PROJECT_ROOT / "calibration/calibrationSession.mat"
-CALIB_REQUIRED = False
+# 4) Camera-parameter source. Change only this switch and, for mode 1, the MAT path.
+# 0 = VGGT Camera Head predicted intrinsics/extrinsics (legacy behaviour)
+# 1 = MATLAB calibrated intrinsics/extrinsics; VGGT Camera Head is not used for geometry
+CAMERA_PARAM_MODE = 0
+CALIB_MAT_PATH = PROJECT_ROOT / "calibration/LG_LS_calibration_numeric.mat"
 
 # 5) VGGT paths
 VGGT_ROOT = Path("/home/wqy/workspace/vggt")
@@ -52,7 +54,7 @@ GROUNDED_SAM_ENV = "grounded_sam2"
 VGGT_ENV = "vggt"
 
 # 8) Output: same structure as previous E1
-OUTPUT_ROOT = PROJECT_ROOT / "outputs/test001"
+OUTPUT_ROOT = PROJECT_ROOT / "outputs/test002"
 
 # 9) Need-mask settings
 TEXT_PROMPT = "wire harness. pipe."
@@ -103,7 +105,9 @@ def assert_exists(path: Path, label: str, required=True):
 def main():
     lg = LG_PATH.expanduser().resolve()
     ls = LS_PATH.expanduser().resolve()
-    calib = CALIB_PATH.expanduser().resolve() if CALIB_PATH else None
+    if CAMERA_PARAM_MODE not in (0, 1):
+        raise ValueError("CAMERA_PARAM_MODE must be 0 or 1")
+    calib = Path(CALIB_MAT_PATH).expanduser().resolve() if CAMERA_PARAM_MODE == 1 else None
     out = (OUTPUT_ROOT / EXPERIMENT_NAME).expanduser().resolve()
 
     assert_exists(CONDA_EXE, "conda")
@@ -115,8 +119,14 @@ def main():
     assert_exists(SAM2_CHECKPOINT, "SAM2 checkpoint")
     assert_exists(GROUNDING_DINO_CONFIG, "GroundingDINO config")
     assert_exists(GROUNDING_DINO_CHECKPOINT, "GroundingDINO checkpoint")
-    if calib is not None:
-        assert_exists(calib, "calibration file", required=CALIB_REQUIRED)
+    if CAMERA_PARAM_MODE == 1 and not os.path.isfile(calib):
+        raise FileNotFoundError(calib)
+
+    if CAMERA_PARAM_MODE == 0:
+        print("[M2GF-DEMO] CAMERA PARAM SOURCE = VGGT predicted intrinsics/extrinsics")
+    else:
+        print("[M2GF-DEMO] CAMERA PARAM SOURCE = MATLAB calibrated intrinsics/extrinsics")
+        print("[M2GF-DEMO] VGGT Camera Head parameters are NOT used for geometry")
 
     mask_dir = out / "01_mask"
     vggt_dir = out / "02_vggt"
@@ -131,6 +141,8 @@ def main():
         "LG": str(lg),
         "LS": str(ls),
         "calibration": str(calib) if calib else None,
+        "camera_param_mode": CAMERA_PARAM_MODE,
+        "camera_param_source": "calibration" if CAMERA_PARAM_MODE == 1 else "vggt_prediction",
         "prompt": TEXT_PROMPT,
         "dilate_radius": DILATE_RADIUS,
         "alignment": ALIGNMENT,
@@ -162,7 +174,7 @@ def main():
         ))
 
     if RUN_VGGT:
-        run(conda_python(
+        cmd02 = conda_python(
             VGGT_ENV, PROJECT_ROOT / "02_run_vggt.py",
             "--lg", lg,
             "--ls", ls,
@@ -174,7 +186,11 @@ def main():
             "--track-max-points", TRACK_MAX_POINTS,
             "--track-vis-threshold", TRACK_VIS_THRESHOLD,
             "--track-conf-threshold", TRACK_CONF_THRESHOLD,
-        ))
+            "--camera-param-mode", CAMERA_PARAM_MODE,
+        )
+        if CAMERA_PARAM_MODE == 1:
+            cmd02 += ["--calib-mat", calib]
+        run(cmd02)
 
     if RUN_SELECTION:
         cmd = conda_python(
@@ -187,9 +203,10 @@ def main():
             "--out", select_dir,
             "--alignment", ALIGNMENT,
             "--preprocess-mode", VGGT_PREPROCESS_MODE,
+            "--camera-param-mode", CAMERA_PARAM_MODE,
         )
-        if calib is not None and calib.exists():
-            cmd += ["--calib", calib]
+        if CAMERA_PARAM_MODE == 1:
+            cmd += ["--calib-mat", calib]
         run(cmd)
 
     if RUN_MERGE:

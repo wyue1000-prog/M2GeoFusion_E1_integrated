@@ -15,6 +15,7 @@ def main():
 
     out_dir = ensure_dir(args.out)
     joint = np.load(args.joint_npz)
+    source = str(np.asarray(joint["camera_param_source"]).item()) if "camera_param_source" in joint else "unknown"
     P_lg = np.asarray(joint["world_points_from_depth"])[0]
     P_ls = np.asarray(joint["world_points_from_depth"])[1]
     rgb_lg = image_tensor_to_rgb_uint8(joint["images"][0])
@@ -36,6 +37,13 @@ def main():
         np.concatenate([P_lg_valid, P_ls_valid], axis=0),
         np.concatenate([gray, red], axis=0),
     )
+    if source == "calibration":
+        write_ascii_ply(
+            out_dir / "03_joint_LG_gray_LS_red_calib.ply",
+            np.concatenate([P_lg_valid, P_ls_valid], axis=0),
+            np.concatenate([gray, red], axis=0),
+        )
+    print(f"[E1-05] camera parameter source = {source}")
     print(f"[E1-05] Joint-LG points = {len(P_lg_valid)}")
     print(f"[E1-05] Joint-LS points = {len(P_ls_valid)}")
     print(f"[E1-05] saved to: {out_dir}")

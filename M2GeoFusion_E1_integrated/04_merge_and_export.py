@@ -28,6 +28,12 @@ def main():
 
     ls_need = np.asarray(data["ls_selected_points"], dtype=np.float32)
     ls_need_colors = np.asarray(data["ls_selected_colors"], dtype=np.uint8)
+    camera_param_source = str(np.asarray(data["camera_param_source"]).item()) if "camera_param_source" in data else "unknown"
+    camera_param_mode = int(np.asarray(data["camera_param_mode"]).item()) if "camera_param_mode" in data else None
+    translation_scale = (float(np.asarray(data["translation_scale_physical_to_vggt"]).item())
+                         if "translation_scale_physical_to_vggt" in data else None)
+    if translation_scale is not None and not np.isfinite(translation_scale):
+        translation_scale = None
 
     if len(anchor) < 2:
         raise RuntimeError("Anchor cloud is too small.")
@@ -127,6 +133,9 @@ def main():
     np.save(out_dir / "ls_need_distance_to_gray.npy", dist_to_gray.astype(np.float32))
 
     save_json(out_dir / "merge_report.json", {
+        "camera_param_source": camera_param_source,
+        "camera_param_mode": camera_param_mode,
+        "translation_scale_physical_to_vggt": translation_scale,
         "anchor_count": int(len(anchor)),
         "all_ls_valid_count": int(len(ls_all)),
         "need_selected_ls_count": int(len(ls_need)),
