@@ -115,6 +115,7 @@ def main():
     cv2.imwrite(str(out_dir / "target_mask.png"), target_mask * 255)
     cv2.imwrite(str(out_dir / "need_mask.png"), need_mask * 255)
     np.save(out_dir / "need_mask.npy", need_mask.astype(np.uint8))
+    np.save(out_dir / "target_mask.npy", target_mask.astype(np.uint8))
 
     img_bgr = cv2.imread(str(lg_path), cv2.IMREAD_COLOR)
     overlay = img_bgr.copy()

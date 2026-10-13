@@ -5,12 +5,14 @@ from pathlib import Path
 import numpy as np
 
 from common import ensure_dir, image_tensor_to_rgb_uint8, write_ascii_ply
+from joint_demo_export import export_joint_demo_ply
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--joint-npz", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--joint-demo-out", help="Independent original Joint Demo PLY path")
     args = ap.parse_args()
 
     out_dir = ensure_dir(args.out)
@@ -47,6 +49,12 @@ def main():
     print(f"[E1-05] Joint-LG points = {len(P_lg_valid)}")
     print(f"[E1-05] Joint-LS points = {len(P_ls_valid)}")
     print(f"[E1-05] saved to: {out_dir}")
+    if args.joint_demo_out:
+        lg_count, ls_count, total, threshold = export_joint_demo_ply(args.joint_npz, args.joint_demo_out)
+        print("[E1-05] 07 joint demo source : world_points_from_depth (original Joint frame)")
+        print(f"[E1-05] 07 global confidence percentile 50 : {threshold:.8g}")
+        print(f"[E1-05] 07 Joint-LG / Joint-LS / total : {lg_count} / {ls_count} / {total}")
+        print(f"[E1-05] saved 07 : {args.joint_demo_out}")
 
 
 if __name__ == "__main__":

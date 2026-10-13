@@ -54,7 +54,7 @@ GROUNDED_SAM_ENV = "grounded_sam2"
 VGGT_ENV = "vggt"
 
 # 8) Output: same structure as previous E1
-OUTPUT_ROOT = PROJECT_ROOT / "outputs/test002_join07"
+OUTPUT_ROOT = PROJECT_ROOT / "outputs/joint_model_filtering"
 
 # 9) Need-mask settings
 TEXT_PROMPT = "wire harness. pipe."
@@ -66,6 +66,18 @@ DILATE_RADIUS = 20
 VGGT_PREPROCESS_MODE = "crop"      # crop | pad
 ALIGNMENT = "scale"                # scale | sim3
 DEDUP_FACTOR = 1.5
+
+# Joint-model experiment; legacy ALIGNMENT / DEDUP_FACTOR apply only to old 03/04.
+DIFF_FACTOR = 1.5
+SIM3_MAD_FACTOR = 3.5
+SIM3_ITERATIONS = 3
+SIM3_MAX_POINTS = 100000
+SEMANTIC_MASK_KIND = "target"       # target | dilated
+KEEP_XD_JOINT_LG = True
+SHAPE_K = 16
+SHAPE_MAD_FACTOR = 3.5
+SHAPE_FILTER_ITERATIONS = 1
+KNN_CHUNK_SIZE = 20000
 
 # 11) Track-head settings
 # Query points are placed on LG (first/reference frame), preferentially inside Need Mask.
@@ -79,6 +91,9 @@ RUN_VGGT = True
 RUN_SELECTION = True
 RUN_MERGE = True
 RUN_JOINT_EXPORT = True
+RUN_JOINT_DIFFERENCE_FILTER = True
+RUN_GLOBAL_SHAPE_FILTER = True
+RUN_LEGACY_POINT_COMPLETION = False  # gates RUN_SELECTION and RUN_MERGE
 
 # ============================================================
 #                END OF USER SETTINGS
@@ -107,6 +122,10 @@ def main():
     ls = LS_PATH.expanduser().resolve()
     if CAMERA_PARAM_MODE not in (0, 1):
         raise ValueError("CAMERA_PARAM_MODE must be 0 or 1")
+    if RUN_JOINT_DIFFERENCE_FILTER and CAMERA_PARAM_MODE != 0:
+        raise ValueError("Joint-model filtering requires CAMERA_PARAM_MODE=0 (VGGT Camera Head).")
+    if SEMANTIC_MASK_KIND not in ("target", "dilated"):
+        raise ValueError("SEMANTIC_MASK_KIND must be target or dilated")
     calib = Path(CALIB_MAT_PATH).expanduser().resolve() if CAMERA_PARAM_MODE == 1 else None
     out = (OUTPUT_ROOT / EXPERIMENT_NAME).expanduser().resolve()
 
@@ -133,7 +152,10 @@ def main():
     select_dir = out / "03_selection"
     cloud_dir = out / "04_pointcloud"
     joint_view_dir = vggt_dir / "joint_view"
-    for d in [mask_dir, vggt_dir, select_dir, cloud_dir, joint_view_dir]:
+    joint_filter_dir = out / "03_joint_filter"
+    global_filter_dir = out / "04_global_filter"
+    semantic_mask = mask_dir / ("target_mask.npy" if SEMANTIC_MASK_KIND == "target" else "need_mask.npy")
+    for d in [mask_dir, vggt_dir, cloud_dir, joint_view_dir, joint_filter_dir, global_filter_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
     manifest = {
@@ -152,6 +174,20 @@ def main():
         "track_conf_threshold": TRACK_CONF_THRESHOLD,
         "grounded_sam_env": GROUNDED_SAM_ENV,
         "vggt_env": VGGT_ENV,
+        "pipeline": "joint_model_filtering",
+        "diff_factor": DIFF_FACTOR,
+        "sim3_mad_factor": SIM3_MAD_FACTOR,
+        "sim3_iterations": SIM3_ITERATIONS,
+        "sim3_max_points": SIM3_MAX_POINTS,
+        "semantic_mask_kind": SEMANTIC_MASK_KIND,
+        "keep_xd_joint_lg": KEEP_XD_JOINT_LG,
+        "shape_k": SHAPE_K,
+        "shape_mad_factor": SHAPE_MAD_FACTOR,
+        "shape_filter_iterations": SHAPE_FILTER_ITERATIONS,
+        "knn_chunk_size": KNN_CHUNK_SIZE,
+        "run_joint_difference_filter": RUN_JOINT_DIFFERENCE_FILTER,
+        "run_global_shape_filter": RUN_GLOBAL_SHAPE_FILTER,
+        "run_legacy_point_completion": RUN_LEGACY_POINT_COMPLETION,
     }
     (out / "experiment_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -192,7 +228,29 @@ def main():
             cmd02 += ["--calib-mat", calib]
         run(cmd02)
 
-    if RUN_SELECTION:
+    if RUN_JOINT_DIFFERENCE_FILTER:
+        run(conda_python(
+            GROUNDED_SAM_ENV, PROJECT_ROOT / "03_joint_difference_filter.py",
+            "--lg", lg, "--ls", ls, "--semantic-mask", semantic_mask,
+            "--gray-npz", vggt_dir / "gray_only.npz",
+            "--joint-npz", vggt_dir / "joint_LG_LS.npz",
+            "--out", joint_filter_dir, "--preprocess-mode", VGGT_PREPROCESS_MODE,
+            "--diff-factor", DIFF_FACTOR, "--sim3-mad-factor", SIM3_MAD_FACTOR,
+            "--sim3-iterations", SIM3_ITERATIONS, "--sim3-max-points", SIM3_MAX_POINTS,
+            "--keep-xd-joint-lg", int(KEEP_XD_JOINT_LG),
+        ))
+
+    if RUN_GLOBAL_SHAPE_FILTER:
+        run(conda_python(
+            GROUNDED_SAM_ENV, PROJECT_ROOT / "04_global_shape_filter.py",
+            "--candidate-data", joint_filter_dir / "candidate_data.npz",
+            "--out", global_filter_dir, "--shape-k", SHAPE_K,
+            "--shape-mad-factor", SHAPE_MAD_FACTOR,
+            "--shape-filter-iterations", SHAPE_FILTER_ITERATIONS,
+            "--knn-chunk-size", KNN_CHUNK_SIZE,
+        ))
+
+    if RUN_LEGACY_POINT_COMPLETION and RUN_SELECTION:
         cmd = conda_python(
             GROUNDED_SAM_ENV, PROJECT_ROOT / "03_select_ls_points.py",
             "--lg", lg,
@@ -209,7 +267,7 @@ def main():
             cmd += ["--calib-mat", calib]
         run(cmd)
 
-    if RUN_MERGE:
+    if RUN_LEGACY_POINT_COMPLETION and RUN_MERGE:
         run(conda_python(
             GROUNDED_SAM_ENV, PROJECT_ROOT / "04_merge_and_export.py",
             "--selection-data", select_dir / "selection_data.npz",
@@ -223,6 +281,7 @@ def main():
             GROUNDED_SAM_ENV, PROJECT_ROOT / "05_export_joint_views.py",
             "--joint-npz", vggt_dir / "joint_LG_LS.npz",
             "--out", joint_view_dir,
+            "--joint-demo-out", cloud_dir / "07_joint_demo.ply",
         ))
 
     print("\n[M2GF-DEMO] =============================================")
@@ -234,7 +293,10 @@ def main():
     print("  Track image   :", vggt_dir / "track_LG_LS.png")
     print("  Track TXT     :", vggt_dir / "track_LG_LS.txt")
     print("  Joint PLY     :", joint_view_dir / "03_joint_LG_gray_LS_red.ply")
-    print("\nExisting E1 outputs are still kept in the same 01/02/03/04 folders.")
+    print("  Original Joint Demo :", cloud_dir / "07_joint_demo.ply")
+    print("  Joint filtering     :", joint_filter_dir)
+    print("  Whole-cloud final   :", global_filter_dir / "02_final_filtered.ply")
+    print("  Legacy completion enabled:", RUN_LEGACY_POINT_COMPLETION)
 
 
 if __name__ == "__main__":

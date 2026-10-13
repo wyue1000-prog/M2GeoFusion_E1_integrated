@@ -7,6 +7,7 @@ from typing import Iterable, Tuple, Dict, Any
 import cv2
 import numpy as np
 from PIL import Image
+from config import SIM3_MAD_FACTOR, SIM3_ITERATIONS, SIM3_MAX_POINTS
 
 
 def ensure_dir(path) -> Path:
@@ -279,6 +280,85 @@ def apply_similarity(points, scale, R=None, t=None):
             out = out + np.asarray(t)[None, :]
 
     return out.reshape(shape).astype(np.float32)
+
+
+def robust_umeyama_similarity(src, dst, mad_factor=SIM3_MAD_FACTOR,
+                              iterations=SIM3_ITERATIONS, max_points=SIM3_MAX_POINTS):
+    """Fit dst ~= s * (src @ R.T) + t with iterative MAD rejection.
+
+    Returns s, R, t, full-length inlier_mask, JSON-ready report. Invalid pairs
+    are False in the mask; its indices refer to the original flattened input.
+    All finite pairs determine residual statistics. Each fit uses at most
+    max_points inliers, sampled reproducibly with default_rng(0).
+    """
+    src = np.asarray(src, dtype=np.float64).reshape(-1, 3)
+    dst = np.asarray(dst, dtype=np.float64).reshape(-1, 3)
+    if src.shape != dst.shape:
+        raise ValueError("Sim3 needs equal-length same-pixel correspondences.")
+    if not np.isfinite(mad_factor) or mad_factor < 0 or iterations < 1 or max_points < 20:
+        raise ValueError("Sim3 requires finite mad_factor >= 0, iterations >= 1, max_points >= 20.")
+    valid = np.isfinite(src).all(axis=1) & np.isfinite(dst).all(axis=1)
+    a, b = src[valid], dst[valid]
+    if len(a) < 20:
+        raise ValueError("Sim3 needs at least 20 finite corresponding points.")
+
+    def fit(mask):
+        ids = np.flatnonzero(mask)
+        if len(ids) < 20:
+            raise ValueError("MAD rejection left fewer than 20 Sim3 inliers.")
+        if len(ids) > max_points:
+            ids = np.random.default_rng(0).choice(ids, max_points, replace=False)
+        for points in (a[ids], b[ids]):
+            if np.linalg.matrix_rank(points - points.mean(axis=0)) < 2:
+                raise ValueError("Degenerate Sim3 correspondences (coincident or collinear).")
+        s, r, t = umeyama_similarity(a[ids], b[ids], max_points=max_points)
+        if not np.isfinite(s) or s <= 0 or not np.isfinite(r).all() or not np.isfinite(t).all() or np.linalg.det(r) <= 0:
+            raise ValueError("Invalid Sim3: require positive scale and a proper rotation.")
+        return s, r, t, ids
+
+    inliers = np.ones(len(a), dtype=bool)
+    scale, R, t, fit_ids = fit(inliers)
+    history = []
+    for iteration in range(iterations):
+        residual = np.linalg.norm(b - (scale * (a @ R.T) + t), axis=1)
+        median = float(np.median(residual))
+        mad = float(np.median(np.abs(residual - median)))
+        threshold = median + mad_factor * 1.4826 * mad
+        # Only absorb machine roundoff when an exact fit makes MAD zero.
+        tolerance = 32 * np.finfo(np.float64).eps * max(1.0, float(np.max(np.abs(b))))
+        inliers = residual <= threshold + tolerance
+        scale, R, t, fit_ids = fit(inliers)
+        history.append({"iteration": iteration + 1, "median": median, "mad": mad,
+                        "threshold": threshold, "roundoff_tolerance": tolerance,
+                        "inlier_count": int(inliers.sum()), "fit_sample_count": len(fit_ids)})
+
+    before = np.linalg.norm(b - a, axis=1)
+    after = np.linalg.norm(b - (scale * (a @ R.T) + t), axis=1)
+    full_mask = np.zeros(len(src), dtype=bool)
+    full_mask[valid] = inliers
+    report = {
+        "input_pair_count": len(src), "correspondence_count": len(a),
+        "inlier_count": int(inliers.sum()), "inlier_ratio": float(inliers.mean()),
+        "inlier_mask_definition": "full input order; MAD-selected pairs used for final refit (before sampling)",
+        "scale": scale, "R": R.tolist(), "t": t.tolist(),
+        "rotation_angle_degree": float(np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1)))),
+        "translation_norm": float(np.linalg.norm(t)), "det_R": float(np.linalg.det(R)),
+        "before_alignment_median": float(np.median(before)),
+        "after_alignment_median": float(np.median(after)),
+        "after_alignment_mean": float(np.mean(after)),
+        "after_alignment_p90": float(np.percentile(after, 90)),
+        "after_alignment_max": float(np.max(after)),
+        "after_alignment_inlier_median": float(np.median(after[inliers])),
+        "residual_statistics_scope": "all finite correspondences, including rejected outliers",
+        "mad_factor": mad_factor, "iterations": iterations, "max_points": max_points,
+        "seed": 0, "fit_sample_count": len(fit_ids), "history": history,
+    }
+    return scale, R, t, full_mask, report
+
+
+def provenance_colors(source_labels):
+    """0 = Gray anchor, 1 = Joint-LG XD, 2 = Joint-LS XD."""
+    return np.asarray([[160, 160, 160], [0, 0, 255], [255, 0, 0]], dtype=np.uint8)[source_labels]
 
 
 def finite_points_and_colors(points, colors=None):
