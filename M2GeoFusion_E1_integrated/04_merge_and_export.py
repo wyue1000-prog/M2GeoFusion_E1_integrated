@@ -10,9 +10,78 @@ from config import DEDUP_FACTOR
 from common import ensure_dir, write_ascii_ply, save_json
 
 
+def export_joint_demo_ply(joint_npz, out_path):
+    """Export the official Demo's depth-and-camera point cloud as ASCII PLY.
+
+    This deliberately has no connection to E1's Need-mask, alignment, or
+    de-duplication path. It reproduces visual_util.predictions_to_glb() with
+    the web Demo defaults: Depthmap and Camera Branch, all frames, and a 50th
+    percentile confidence threshold.
+    """
+    joint = np.load(joint_npz)
+    required = ("world_points_from_depth", "depth_conf", "images")
+    missing = [key for key in required if key not in joint]
+    if missing:
+        raise KeyError(
+            f"Joint NPZ is missing {missing}; rerun 02 so it saves the "
+            "Depth Head confidence and preprocessed RGB images."
+        )
+
+    point_maps = np.asarray(joint["world_points_from_depth"], dtype=np.float32)
+    depth_conf = np.asarray(joint["depth_conf"], dtype=np.float32)
+    images = np.asarray(joint["images"])
+    if point_maps.ndim != 4 or point_maps.shape[-1] != 3 or point_maps.shape[0] != 2:
+        raise ValueError(
+            "Expected Joint [LG, LS] world_points_from_depth with shape "
+            f"(2, H, W, 3), got {point_maps.shape}."
+        )
+    if depth_conf.shape == point_maps.shape[:-1] + (1,):
+        depth_conf = depth_conf[..., 0]
+    if depth_conf.shape != point_maps.shape[:-1]:
+        raise ValueError(
+            f"depth_conf shape {depth_conf.shape} does not match point maps {point_maps.shape[:-1]}."
+        )
+    if images.ndim == 3 and images.shape[0] == 2:  # (S, H, W) grayscale
+        rgb = np.repeat(images[..., None], 3, axis=-1)
+    elif images.ndim != 4 or images.shape[0] != 2:
+        raise ValueError(f"Expected Joint [LG, LS] image tensor, got {images.shape}.")
+    elif images.shape[1] == 3:  # Official Demo accepts NCHW here.
+        rgb = np.transpose(images, (0, 2, 3, 1))
+    elif images.shape[1] == 1:  # (S, 1, H, W) grayscale
+        rgb = np.repeat(np.transpose(images, (0, 2, 3, 1)), 3, axis=-1)
+    elif images.shape[-1] == 3:
+        rgb = images
+    elif images.shape[-1] == 1:  # (S, H, W, 1) grayscale
+        rgb = np.repeat(images, 3, axis=-1)
+    else:
+        raise ValueError(f"Expected RGB Joint images, got {images.shape}.")
+    if rgb.shape[:3] != point_maps.shape[:3]:
+        raise ValueError(f"Image shape {rgb.shape} does not match point maps {point_maps.shape}.")
+
+    # Exact official filtering: flatten all selected frames, calculate the
+    # percentile globally, then retain >= threshold and confidence > 1e-5.
+    flat_conf = depth_conf.reshape(-1)
+    conf_threshold = float(np.percentile(flat_conf, 50.0))
+    conf_mask = (flat_conf >= conf_threshold) & (flat_conf > 1e-5)
+    flat_points = point_maps.reshape(-1, 3)
+    flat_colors = np.clip(rgb.reshape(-1, 3) * 255.0, 0, 255).astype(np.uint8)
+
+    # write_ascii_ply also rejects non-finite XYZ, as a PLY cannot represent
+    # those points. This is the only additional validity constraint.
+    finite_mask = np.isfinite(flat_points).all(axis=1)
+    keep = conf_mask & finite_mask
+    frame_pixels = point_maps.shape[1] * point_maps.shape[2]
+    lg_count = int(np.count_nonzero(keep[:frame_pixels]))
+    ls_count = int(np.count_nonzero(keep[frame_pixels:]))
+    write_ascii_ply(out_path, flat_points[keep], flat_colors[keep])
+    return lg_count, ls_count, int(np.count_nonzero(keep)), conf_threshold
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--selection-data", required=True)
+    ap.add_argument("--joint-npz", required=True,
+                    help="02's original [LG, LS] Joint inference NPZ, used only for 07_joint_demo.ply")
     ap.add_argument("--out", required=True)
     ap.add_argument("--dedup-factor", type=float, default=DEDUP_FACTOR)
     args = ap.parse_args()
@@ -20,13 +89,20 @@ def main():
     out_dir = ensure_dir(args.out)
     data = np.load(args.selection_data)
 
-    anchor = np.asarray(data["anchor_points"], dtype=np.float32)
+    joint_lg_count, joint_ls_count, joint_total, joint_conf_threshold = export_joint_demo_ply(
+        args.joint_npz,
+        out_dir / "07_joint_demo.ply",
+    )
+
+    # This is the finite-point subset from 03's gray_only Pg0 map.  It is the
+    # sole source for both 01_gray_anchor.ply and the gray prefix of merged PLYs.
+    gray_anchor = np.asarray(data["anchor_points"], dtype=np.float32)
     anchor_colors = np.asarray(data["anchor_colors"], dtype=np.uint8)
 
     ls_all = np.asarray(data["ls_all_points"], dtype=np.float32)
     ls_all_colors = np.asarray(data["ls_all_colors"], dtype=np.uint8)
 
-    ls_need = np.asarray(data["ls_selected_points"], dtype=np.float32)
+    selected_ls = np.asarray(data["ls_selected_points"], dtype=np.float32)
     ls_need_colors = np.asarray(data["ls_selected_colors"], dtype=np.uint8)
     camera_param_source = str(np.asarray(data["camera_param_source"]).item()) if "camera_param_source" in data else "unknown"
     camera_param_mode = int(np.asarray(data["camera_param_mode"]).item()) if "camera_param_mode" in data else None
@@ -35,9 +111,9 @@ def main():
     if translation_scale is not None and not np.isfinite(translation_scale):
         translation_scale = None
 
-    if len(anchor) < 2:
+    if len(gray_anchor) < 2:
         raise RuntimeError("Anchor cloud is too small.")
-    if len(ls_need) == 0:
+    if len(selected_ls) == 0:
         raise RuntimeError(
             "No LS candidate passed the Need mask. "
             "请检查 need_mask / 投影关系 / prompt。"
@@ -46,10 +122,10 @@ def main():
     # ------------------------------------------------------------
     # 1. Gray anchor 自己的典型点间距
     # ------------------------------------------------------------
-    tree = cKDTree(anchor)
+    tree = cKDTree(gray_anchor)
 
     # 对全部 anchor 求 k=2；第 0 个邻居是自己，第 1 个才是最近其他点
-    d2, _ = tree.query(anchor, k=2, workers=-1)
+    d2, _ = tree.query(gray_anchor, k=2, workers=-1)
     nn_spacing = d2[:, 1]
     nn_spacing = nn_spacing[np.isfinite(nn_spacing) & (nn_spacing > 0)]
 
@@ -62,7 +138,7 @@ def main():
     # ------------------------------------------------------------
     # 2. Need-selected LS 到 Gray Anchor 的最近距离
     # ------------------------------------------------------------
-    dist_to_gray, _ = tree.query(ls_need, k=1, workers=-1)
+    dist_to_gray, _ = tree.query(selected_ls, k=1, workers=-1)
     finite_dist = dist_to_gray[np.isfinite(dist_to_gray)]
     dist_min = float(np.min(finite_dist)) if len(finite_dist) else float("nan")
     dist_median = float(np.median(finite_dist)) if len(finite_dist) else float("nan")
@@ -70,7 +146,7 @@ def main():
     dist_max = float(np.max(finite_dist)) if len(finite_dist) else float("nan")
 
     add_mask = np.isfinite(dist_to_gray) & (dist_to_gray > tau_dup)
-    ls_add = ls_need[add_mask]
+    ls_add = selected_ls[add_mask]
     ls_add_colors = ls_need_colors[add_mask]
 
     # ------------------------------------------------------------
@@ -78,11 +154,11 @@ def main():
     # ------------------------------------------------------------
     gray_color_for_vis = np.tile(
         np.array([[160, 160, 160]], dtype=np.uint8),
-        (len(anchor), 1),
+        (len(gray_anchor), 1),
     )
     red_need = np.tile(
         np.array([[255, 0, 0]], dtype=np.uint8),
-        (len(ls_need), 1),
+        (len(selected_ls), 1),
     )
     red_add = np.tile(
         np.array([[255, 0, 0]], dtype=np.uint8),
@@ -91,7 +167,7 @@ def main():
 
     write_ascii_ply(
         out_dir / "01_gray_anchor.ply",
-        anchor,
+        gray_anchor,
         anchor_colors,
     )
     write_ascii_ply(
@@ -101,21 +177,34 @@ def main():
     )
     write_ascii_ply(
         out_dir / "03_ls_need_candidates.ply",
-        ls_need,
+        selected_ls,
         red_need,
     )
 
-    # Raw: gray 全保留 + 所有 Need-selected LS
-    raw_points = np.concatenate([anchor, ls_need], axis=0)
+    # Raw: gray XYZ is copied verbatim before the selected LS suffix.
+    merged_xyz = np.concatenate([gray_anchor, selected_ls], axis=0)
+    assert np.allclose(
+        merged_xyz[:len(gray_anchor)],
+        gray_anchor,
+        atol=1e-8,
+    )
+    gray_consistency_error = np.linalg.norm(
+        merged_xyz[:len(gray_anchor)] - gray_anchor,
+        axis=1,
+    )
+    gray_consistency_max_error = float(np.max(gray_consistency_error))
+    gray_consistency_mean_error = float(np.mean(gray_consistency_error))
+    gray_consistency_median_error = float(np.median(gray_consistency_error))
+
     raw_colors = np.concatenate([gray_color_for_vis, red_need], axis=0)
     write_ascii_ply(
         out_dir / "04_gray_plus_ls_raw.ply",
-        raw_points,
+        merged_xyz,
         raw_colors,
     )
 
     # De-dup: gray 全保留 + 真正离开已有 gray 采样点一定距离的 LS
-    dedup_points = np.concatenate([anchor, ls_add], axis=0)
+    dedup_points = np.concatenate([gray_anchor, ls_add], axis=0)
     dedup_colors = np.concatenate([gray_color_for_vis, red_add], axis=0)
     write_ascii_ply(
         out_dir / "05_gray_plus_ls_dedup.ply",
@@ -136,16 +225,19 @@ def main():
         "camera_param_source": camera_param_source,
         "camera_param_mode": camera_param_mode,
         "translation_scale_physical_to_vggt": translation_scale,
-        "anchor_count": int(len(anchor)),
+        "anchor_count": int(len(gray_anchor)),
         "all_ls_valid_count": int(len(ls_all)),
-        "need_selected_ls_count": int(len(ls_need)),
+        "need_selected_ls_count": int(len(selected_ls)),
         "median_gray_nn_spacing": median_nn,
         "dedup_factor": float(args.dedup_factor),
         "tau_dup": tau_dup,
         "true_added_ls_count": int(len(ls_add)),
-        "true_added_ratio_of_need_selected": float(len(ls_add) / max(len(ls_need), 1)),
-        "raw_merged_count": int(len(raw_points)),
+        "true_added_ratio_of_need_selected": float(len(ls_add) / max(len(selected_ls), 1)),
+        "raw_merged_count": int(len(merged_xyz)),
         "dedup_merged_count": int(len(dedup_points)),
+        "gray_consistency_max_3d_error": gray_consistency_max_error,
+        "gray_consistency_mean_3d_error": gray_consistency_mean_error,
+        "gray_consistency_median_3d_error": gray_consistency_median_error,
         "ls_to_gray_min_distance": dist_min,
         "ls_to_gray_median_distance": dist_median,
         "ls_to_gray_p90_distance": dist_p90,
@@ -153,8 +245,11 @@ def main():
     })
 
     print("[E1-04] --------------------------------------")
-    print(f"[E1-04] Gray anchor              : {len(anchor)}")
-    print(f"[E1-04] Need-selected LS         : {len(ls_need)}")
+    print(f"[E1-04] Gray anchor              : {len(gray_anchor)}")
+    print(f"[E1-04] Need-selected LS         : {len(selected_ls)}")
+    print(f"[E1-04] Gray consistency max 3D error    : {gray_consistency_max_error:.8e}")
+    print(f"[E1-04] Gray consistency mean 3D error   : {gray_consistency_mean_error:.8e}")
+    print(f"[E1-04] Gray consistency median 3D error : {gray_consistency_median_error:.8e}")
     print(f"[E1-04] median gray NN spacing   : {median_nn:.8f}")
     print(f"[E1-04] tau_dup                  : {tau_dup:.8f}")
     print(f"[E1-04] LS->Gray min distance    : {dist_min:.8f}")
@@ -162,7 +257,14 @@ def main():
     print(f"[E1-04] LS->Gray P90 distance    : {dist_p90:.8f}")
     print(f"[E1-04] LS->Gray max distance    : {dist_max:.8f}")
     print(f"[E1-04] true added LS            : {len(ls_add)}")
-    print(f"[E1-04] true-added ratio         : {len(ls_add)/max(len(ls_need),1):.4f}")
+    print(f"[E1-04] true-added ratio         : {len(ls_add)/max(len(selected_ls),1):.4f}")
+    print("[E1-04] 07 joint demo source      : world_points_from_depth")
+    print("[E1-04] 07 confidence filtering   : depth_conf global 50th percentile "
+          f"({joint_conf_threshold:.8g}), conf > 1e-5")
+    print(f"[E1-04] 07 Joint-LG points       : {joint_lg_count}")
+    print(f"[E1-04] 07 Joint-LS points       : {joint_ls_count}")
+    print(f"[E1-04] 07 total points          : {joint_total}")
+    print(f"[E1-04] saved 07                 : {out_dir / '07_joint_demo.ply'}")
     print(f"[E1-04] output dir               : {out_dir}")
 
 

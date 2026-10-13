@@ -54,7 +54,7 @@ GROUNDED_SAM_ENV = "grounded_sam2"
 VGGT_ENV = "vggt"
 
 # 8) Output: same structure as previous E1
-OUTPUT_ROOT = PROJECT_ROOT / "outputs/test002"
+OUTPUT_ROOT = PROJECT_ROOT / "outputs/test002_join07"
 
 # 9) Need-mask settings
 TEXT_PROMPT = "wire harness. pipe."
@@ -213,6 +213,7 @@ def main():
         run(conda_python(
             GROUNDED_SAM_ENV, PROJECT_ROOT / "04_merge_and_export.py",
             "--selection-data", select_dir / "selection_data.npz",
+            "--joint-npz", vggt_dir / "joint_LG_LS.npz",
             "--out", cloud_dir,
             "--dedup-factor", DEDUP_FACTOR,
         ))
